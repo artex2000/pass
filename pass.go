@@ -34,13 +34,14 @@ func main() {
             for i := 0; i < 3; i++ {
                 fmt.Print("Password> ")
                 p, _ := terminal.ReadPassword(int(syscall.Stdin))
-                fmt.Print("Repeat> ")
+                fmt.Print("\nRepeat> ")
                 p2, _ := terminal.ReadPassword(int(syscall.Stdin))
                 if len(p) == 0 {
-                    fmt.Println("Password can't be empty")
+                    fmt.Println("\nPassword can't be empty")
                 } else if !bytes.Equal(p, p2) {
-                    fmt.Println("Passwords don't match")
+                    fmt.Println("\nPasswords don't match")
                 } else {
+                    fmt.Print("\n")
                     r := Record{n, h, p}
                     db = append(db, r)
                     break
