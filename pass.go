@@ -7,6 +7,7 @@ import (
     "bufio"
     "bytes"
     "strings"
+    "strconv"
     "syscall"
     "golang.org/x/crypto/ssh/terminal"
     "github.com/artex2000/pass/clipboard"
@@ -23,8 +24,8 @@ type Action func(r *bufio.Reader)
 var commands = map[string]Action {
          "add":    passAdd,
          "list":   passList,
-         "load":   passTodo,
-         "save":   passTodo,
+         "load":   passLoad,
+         "save":   passSave,
          "paste":  passPaste,
          "help":   passTodo,
          "delete": passTodo,
@@ -54,6 +55,48 @@ func main() {
 }
 
 func passTodo(r *bufio.Reader) {
+}
+
+func passLoad(r *bufio.Reader) {
+        f, err := os.Open("./db.pass")
+        if err != nil {
+                fmt.Println("Can't open file")
+                return
+        }
+        l := bufio.NewReader(f)
+        t, _ := l.ReadString('\n')
+        n, err := strconv.Atoi(strings.TrimSpace(t))
+        if err != nil {
+                fmt.Println("Invalid file format")
+                return
+        }
+        for i := 0; i < n; i++ {
+                t, _ := l.ReadString('\n')
+                p := strings.SplitN(t, ":", 3)
+                r := Record{p[0], p[1], []byte(strings.TrimSpace(p[2]))} 
+                db = append(db, r)
+        }
+}
+
+func passSave(r *bufio.Reader) {
+        if len(db) == 0 {
+                return
+        }
+        f, err := os.Create("./db.pass")
+        if err != nil {
+                fmt.Println("Can't create file")
+                return
+        }
+
+        w := bufio.NewWriter(f)
+        fmt.Fprintf(w, "%d\n", len(db))
+        for _, v := range db {
+                fmt.Fprintf(w, "%s:%s:%s\n", v.nick, v.hint, string(v.pass))
+        }
+        err = w.Flush()
+        if err != nil {
+                fmt.Println("Error saving file")
+        }
 }
 
 func passList(r *bufio.Reader) {
