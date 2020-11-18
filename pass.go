@@ -35,7 +35,6 @@ var db []Record
 
 func main() {
         r := bufio.NewReader(os.Stdin)
-        db = make([]Record, 0)
         for {
                 fmt.Print("Pass> ")
                 c, _ := r.ReadString('\n')
@@ -69,22 +68,39 @@ func passList(r *bufio.Reader) {
 
 func passAdd(r *bufio.Reader) {
         var n, h string
-        fmt.Print("Nickname> ")
-        n, _ = r.ReadString('\n')
-        n = strings.TrimSpace(n)
+
+        for i := 0; i < 2; i++ {
+                fmt.Print("Nickname> ")
+                n, _ = r.ReadString('\n')
+                n = strings.TrimSpace(n)
+                if len(n) != 0 {
+                        break
+                }
+                fmt.Println("Nickname can't be empty")
+        }
+        if len(n) == 0 {
+                return
+        }
+
         fmt.Print("Hint (optional)> ")
         h, _ = r.ReadString('\n')
         h = strings.TrimSpace(h)
+
         for i := 0; i < 3; i++ {
                 fmt.Print("Enter Password> ")
                 p, _ := terminal.ReadPassword(int(syscall.Stdin))
-                fmt.Print("\r                                                     \r\n")
-                fmt.Print("Repeat Password> ")
-                p2, _ := terminal.ReadPassword(int(syscall.Stdin))
-                fmt.Print("\r                                                     \r\n")
+                //Hack to clear cursor after password read
+                fmt.Print("\rEnter Password>                                      \r\n")
                 if len(p) == 0 {
                         fmt.Println("Password can't be empty")
-                } else if !bytes.Equal(p, p2) {
+                        continue
+                }
+
+                fmt.Print("Repeat Password> ")
+                p2, _ := terminal.ReadPassword(int(syscall.Stdin))
+                //Hack to clear cursor after password read
+                fmt.Print("\rRepeat Password>                                     \r\n")
+                if !bytes.Equal(p, p2) {
                         fmt.Println("Passwords don't match")
                 } else {
                         r := Record{n, h, p}
@@ -100,8 +116,11 @@ func passPaste(r *bufio.Reader) {
         n = strings.TrimSpace(n)
         p, err := findPass(n)
         if err == nil {
-                fmt.Println("Password is in clipboard")
                 err = clipboard.WriteAll(string(p))
+                if err != nil {
+                        fmt.Println("Error pasting password into clipboard")
+                }
+                fmt.Println("Password is in clipboard")
                 st := time.Now()
                 c := time.Tick(time.Second)
                 for range c {
@@ -113,6 +132,9 @@ func passPaste(r *bufio.Reader) {
                         fmt.Printf("Clipboard with clear in %ds\r", 10 - el)
                 }
                 err = clipboard.ClearAll()
+                if err != nil {
+                        fmt.Println("Error erasing password from clipboard")
+                }
         }
 }
 
