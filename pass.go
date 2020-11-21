@@ -15,9 +15,18 @@ import (
 
 type Record struct {
     nick string
+    login string
     hint string
     pass []byte
 }
+
+type Database struct {
+        loaded bool
+        filename string
+        records []Record
+}
+
+var db Database
 
 type Action func(r *bufio.Reader)
 
@@ -27,12 +36,24 @@ var commands = map[string]Action {
          "load":   passLoad,
          "save":   passSave,
          "paste":  passPaste,
-         "help":   passTodo,
+         "help":   passHelp,
          "delete": passTodo,
          "find":   passTodo,
 }
 
-var db []Record
+var commands_help = map[string]string {
+         "add":    "Add login/password pair",
+         "list":   "List stored login/password pairs",
+         "load":   "Load password database",
+         "save":   "Save password database",
+         "paste":  "Paste password into clipboard",
+         "help":   "List available commands",
+         "delete": "Delete login/password pair",
+         "find":   "Find available login/password pairs by partial match",
+         "quit":   "Exit program",
+}
+
+
 
 func main() {
         r := bufio.NewReader(os.Stdin)
@@ -55,6 +76,7 @@ func main() {
 }
 
 func passTodo(r *bufio.Reader) {
+        fmt.Println("Not implemented yet")
 }
 
 func passLoad(r *bufio.Reader) {
@@ -72,14 +94,14 @@ func passLoad(r *bufio.Reader) {
         }
         for i := 0; i < n; i++ {
                 t, _ := l.ReadString('\n')
-                p := strings.SplitN(t, ":", 3)
-                r := Record{p[0], p[1], []byte(strings.TrimSpace(p[2]))} 
-                db = append(db, r)
+                p := strings.SplitN(t, ":", 4)
+                r := Record{p[0], p[1], p[2], []byte(strings.TrimSpace(p[3]))} 
+                db.records = append(db.records, r)
         }
 }
 
 func passSave(r *bufio.Reader) {
-        if len(db) == 0 {
+        if len(db.records) == 0 {
                 return
         }
         f, err := os.Create("./db.pass")
@@ -89,9 +111,9 @@ func passSave(r *bufio.Reader) {
         }
 
         w := bufio.NewWriter(f)
-        fmt.Fprintf(w, "%d\n", len(db))
-        for _, v := range db {
-                fmt.Fprintf(w, "%s:%s:%s\n", v.nick, v.hint, string(v.pass))
+        fmt.Fprintf(w, "%d\n", len(db.records))
+        for _, v := range db.records {
+                fmt.Fprintf(w, "%s:%s:%s:%s\n", v.nick, v.login, v.hint, string(v.pass))
         }
         err = w.Flush()
         if err != nil {
@@ -99,34 +121,35 @@ func passSave(r *bufio.Reader) {
         }
 }
 
+func passHelp(r *bufio.Reader) {
+        for k, v := range commands_help {
+                fmt.Printf("%s:\t%s\n", k, v)
+        }
+}
+
 func passList(r *bufio.Reader) {
-        if len(db) == 0 {
+        if len(db.records) == 0 {
                 fmt.Println("No records found")
                 } else {
-                for i, v := range db {
-                        fmt.Printf("%d. %s (%s)\n", i, v.nick, v.hint)
+                for _, v := range db.records {
+                        fmt.Printf("[%s]:\tlogin: %s\t-- %s\n", v.nick, v.login, v.hint)
                 }
         }
 }
 
 func passAdd(r *bufio.Reader) {
-        var n, h string
-
-        for i := 0; i < 2; i++ {
-                fmt.Print("Nickname> ")
-                n, _ = r.ReadString('\n')
-                n = strings.TrimSpace(n)
-                if len(n) != 0 {
-                        break
-                }
-                fmt.Println("Nickname can't be empty")
+        n, err := mustString(r, "Nickname", 2, true)
+        if (err != nil) {
+                return
         }
-        if len(n) == 0 {
+
+        l, err := mustString(r, "Login", 2, false)
+        if (err != nil) {
                 return
         }
 
         fmt.Print("Hint (optional)> ")
-        h, _ = r.ReadString('\n')
+        h, _ := r.ReadString('\n')
         h = strings.TrimSpace(h)
 
         for i := 0; i < 3; i++ {
@@ -146,8 +169,8 @@ func passAdd(r *bufio.Reader) {
                 if !bytes.Equal(p, p2) {
                         fmt.Println("Passwords don't match")
                 } else {
-                        r := Record{n, h, p}
-                        db = append(db, r)
+                        r := Record{n, l, h, p}
+                        db.records = append(db.records, r)
                         break
                 }
         }
@@ -183,11 +206,60 @@ func passPaste(r *bufio.Reader) {
 
 
 func findPass(n string) ([]byte, error) {
-        for _, v := range db {
+        for _, v := range db.records {
                 if v.nick == n {
                         return v.pass, nil
                 }
         }
         return nil, fmt.Errorf("Record %s not found", n)
+}
+
+func mustString(r *bufio.Reader, prompt string, retries int, unique bool) (string, error) {
+        var n string
+        entered := false
+
+        for i := 0; i < retries; i++ {
+                fmt.Printf("%s> ", prompt)
+                n, _ = r.ReadString('\n')
+                n = strings.TrimSpace(n)
+                if len(n) == 0 {
+                        fmt.Printf("%s can't be empty\n", prompt)
+                } else if unique {
+                        _, err := findPass(n)
+                        if err == nil {
+                                fmt.Printf("%s nickname already present\n", n)
+                        } else {
+                                entered = true
+                                break
+                        }
+                } else {
+                        entered = true
+                        break
+                }
+        }
+        if entered {
+                return n, nil
+        } else {
+                return "", fmt.Errorf("Invalid input")
+        }
+}
+
+func mustPath(r *bufio.Reader, retries int) (string, error) {
+        var n string
+
+        for i := 0; i < retries; i++ {
+                fmt.Print("Enter filename> ")
+                n, _ = r.ReadString('\n')
+                n = strings.TrimSpace(n)
+                if len(n) != 0 {
+                        break
+                }
+                fmt.Println("Filename can't be empty")
+        }
+        if len(n) == 0 {
+                return "", fmt.Errorf("Invalid filename")
+        } else {
+                return n, nil
+        }
 }
 
