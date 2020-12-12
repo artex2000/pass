@@ -31,7 +31,6 @@ type Database struct {
         iv       []byte
         key      []byte
         records  []Record
-        existing bool
 }
 
 var db Database
@@ -41,6 +40,7 @@ type Action func(r *bufio.Reader)
 var commands = map[string]Action {
          "add":    passAdd,
          "init":   passInit,
+         "info":   passInfo,
          "list":   passList,
          "load":   passLoad,
          "save":   passSave,
@@ -52,7 +52,8 @@ var commands = map[string]Action {
 
 var commands_help = map[string]string {
          "add":    "Add login/password pair",
-         "init":    "Init new database",
+         "init":   "Init new database",
+         "info":   "Show database info",
          "list":   "List stored login/password pairs",
          "load":   "Load password database",
          "save":   "Save password database",
@@ -64,6 +65,12 @@ var commands_help = map[string]string {
 }
 
 func main() {
+        //init db
+        db.filename = ""
+        db.key      = nil
+        db.iv       = nil
+        db.sha      = nil
+
         r := bufio.NewReader(os.Stdin)
         for {
                 fmt.Print("Pass> ")
@@ -87,6 +94,13 @@ func passTodo(r *bufio.Reader) {
         fmt.Println("Not implemented yet")
 }
 
+func passInfo(r *bufio.Reader) {
+        if db.filename == "" {
+                fmt.Println("No active database")
+        }
+        fmt.Printf("Database: %s, %d records\n", db.filename, len(db.records))
+}
+
 func passInit(r *bufio.Reader) {
         //get filename
         fn, err := mustPath(r, 2)
@@ -107,12 +121,12 @@ func passInit(r *bufio.Reader) {
 
         fn, err = filepath.Abs(fn)
         if err != nil {
+                fmt.Printf("Error getting path %s\n", err)
                 return
         }
 
         db.filename = fn
         db.key, db.iv = passToKey(p)
-        db.existing = false
 }
 
 func passLoad(r *bufio.Reader) {
@@ -147,14 +161,12 @@ func passLoad(r *bufio.Reader) {
 
         db.key, db.iv = passToKey(p)
         db.filename = fn
-        db.existing = true
 
         defer func() {
                 if failed {
                         db.filename = ""
                         db.key = nil
                         db.iv = nil
-                        db.existing = false
                 }
         }()
 
@@ -166,8 +178,6 @@ func passLoad(r *bufio.Reader) {
         }
 
         //Here we will try to verify file hash
-        //1. First string should be sha256 hash encoded in base64
-        // - string length must be EncodedLen(32)
         idx := base64.StdEncoding.EncodedLen(32)
         sha_enc := content[0:idx]
         sha := make([]byte, 32)
@@ -177,6 +187,7 @@ func passLoad(r *bufio.Reader) {
                 fmt.Println("Invalid file format")
                 return
         }
+
         record := content[(idx + 2):]
         sha_calc := sha256.Sum256(record)
         if !bytes.Equal(sha, sha_calc[:]) {
@@ -184,9 +195,10 @@ func passLoad(r *bufio.Reader) {
                 fmt.Println("File hash doesn't match")
                 return
         }
+        db.sha = sha
 
         lines := strings.Split(string(record), "\r\n")
-        for i := 1; i < len(lines); i++ {
+        for i := 0; i < len(lines); i++ {
                 t := lines[i]
                 p := strings.SplitN(t, ":", 4)
                 r := Record{p[0], p[1], p[2], p[3]} 
@@ -201,6 +213,18 @@ func passSave(r *bufio.Reader) {
 
         c     := serializeDb()
         sha   := sha256.Sum256([]byte(c))
+        if db.sha != nil && bytes.Equal(sha[:], db.sha) {
+                fmt.Println("No changes to save")
+                return //no changes to existing file
+        }
+
+        if db.filename == "" { //no existing file
+                passInit(r)
+                if db.filename == "" { //init new file failed
+                        return
+                }
+        }
+
         sha_t := base64.StdEncoding.EncodeToString(sha[:])
         out   := sha_t + "\r\n" + c
 
@@ -219,6 +243,8 @@ func passSave(r *bufio.Reader) {
         _, err = f.Write(data)
         if err != nil {
                 fmt.Printf("Error writing file %s\n", err)
+        } else {
+                fmt.Println("Saved")
         }
 }
 
@@ -380,7 +406,7 @@ func passToKey(pass []byte) (key, iv []byte) {
 func serializeDb() string {
         var txt []string
         for _, v := range db.records {
-                s := fmt.Sprintf("%s:%s:%s:%s\n", v.nick, v.login, v.hint, v.pass)
+                s := fmt.Sprintf("%s:%s:%s:%s", v.nick, v.login, v.hint, v.pass)
                 txt = append(txt, s)
         }
         return strings.Join(txt, "\r\n")
