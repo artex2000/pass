@@ -5,24 +5,32 @@ import (
     "time"
     "os"
     "bufio"
+    "io/ioutil"
     "bytes"
     "strings"
     "syscall"
+    "path/filepath"
+    "crypto/sha256"
+    "crypto/aes"
+    "crypto/cipher"
+    "encoding/base64"
     "golang.org/x/crypto/ssh/terminal"
     "github.com/artex2000/pass/clipboard"
 )
 
 type Record struct {
-    nick string
+    nick  string
     login string
-    hint string
-    pass []byte
+    hint  string
+    pass  string //base64 encoded password 
 }
 
 type Database struct {
-        loaded bool
         filename string
-        records []Record
+        sha      []byte
+        iv       []byte
+        key      []byte
+        records  []Record
 }
 
 var db Database
@@ -31,9 +39,11 @@ type Action func(r *bufio.Reader)
 
 var commands = map[string]Action {
          "add":    passAdd,
+         "init":   passInit,
+         "info":   passInfo,
          "list":   passList,
-         "load":   passTodo,
-         "save":   passTodo,
+         "load":   passLoad,
+         "save":   passSave,
          "paste":  passPaste,
          "help":   passHelp,
          "delete": passTodo,
@@ -42,6 +52,8 @@ var commands = map[string]Action {
 
 var commands_help = map[string]string {
          "add":    "Add login/password pair",
+         "init":   "Init new database",
+         "info":   "Show database info",
          "list":   "List stored login/password pairs",
          "load":   "Load password database",
          "save":   "Save password database",
@@ -52,9 +64,13 @@ var commands_help = map[string]string {
          "quit":   "Exit program",
 }
 
-
-
 func main() {
+        //init db
+        db.filename = ""
+        db.key      = nil
+        db.iv       = nil
+        db.sha      = nil
+
         r := bufio.NewReader(os.Stdin)
         for {
                 fmt.Print("Pass> ")
@@ -78,6 +94,166 @@ func passTodo(r *bufio.Reader) {
         fmt.Println("Not implemented yet")
 }
 
+func passInfo(r *bufio.Reader) {
+        if db.filename == "" {
+                fmt.Println("No active database")
+        }
+        fmt.Printf("Database: %s, %d records\n", db.filename, len(db.records))
+}
+
+func passInit(r *bufio.Reader) {
+        //get filename
+        fn, err := mustPath(r, 2)
+        if err != nil {
+                return
+        }
+
+        //get pass phrase
+        fmt.Print("Enter Pass phrase> ")
+        p, _ := terminal.ReadPassword(int(syscall.Stdin))
+        //Hack to clear cursor after password read
+        //TODO: set correct number of white spaces for proper clearing
+        fmt.Print("\rEnter Passphrase>                                      \r\n")
+        if len(p) == 0 {
+                fmt.Println("Pass phrase can't be empty")
+                return
+        }
+
+        fn, err = filepath.Abs(fn)
+        if err != nil {
+                fmt.Printf("Error getting path %s\n", err)
+                return
+        }
+
+        db.filename = fn
+        db.key, db.iv = passToKey(p)
+}
+
+func passLoad(r *bufio.Reader) {
+        failed := false
+        fn, err := mustPath(r, 2)
+        if err != nil {
+                return
+        }
+
+        fn, err = filepath.Abs(fn)
+        if err != nil {
+                fmt.Printf("Error opening file %s\n", err)
+                return
+        }
+
+        data, err := ioutil.ReadFile(fn)
+        if err != nil {
+                fmt.Printf("Error reading file %s\n", err)
+                return
+        }
+
+        //get pass phrase
+        fmt.Print("Enter Pass phrase> ")
+        p, _ := terminal.ReadPassword(int(syscall.Stdin))
+        //Hack to clear cursor after password read
+        //TODO: set correct number of white spaces for proper clearing
+        fmt.Print("\rEnter Passphrase>                                      \r\n")
+        if len(p) == 0 {
+                fmt.Println("Pass phrase can't be empty")
+                return
+        }
+
+        db.key, db.iv = passToKey(p)
+        db.filename = fn
+
+        defer func() {
+                if failed {
+                        db.filename = ""
+                        db.key = nil
+                        db.iv = nil
+                }
+        }()
+
+        //decrypt file
+        content, err := cryptFile(data)
+        if err != nil {
+                failed = true
+                fmt.Printf("Error decode file: %s\n", err)
+                return
+        }
+
+        //Here we will try to verify file hash
+        //First we get stored hash from file, which is encoded in base64
+        //So we ask how many base64 bytes it will take to encode 32 real bytes
+        //And read that amount from file
+        idx := base64.StdEncoding.EncodedLen(32)
+        sha_enc := content[0:idx]
+        sha := make([]byte, 32)
+        //Then we decode them from base64 to actual bytes
+        n, err := base64.StdEncoding.Decode(sha, sha_enc)
+        if err != nil || n != 32 {
+                failed = true
+                fmt.Println("Invalid file format")
+                return
+        }
+
+        //Now we calculate hash of records and compare it with stored hash
+        record := content[(idx + 2):]
+        sha_calc := sha256.Sum256(record)
+        if !bytes.Equal(sha, sha_calc[:]) {
+                failed = true
+                fmt.Println("File hash doesn't match")
+                return
+        }
+        db.sha = sha
+
+        lines := strings.Split(string(record), "\r\n")
+        for i := 0; i < len(lines); i++ {
+                t := lines[i]
+                p := strings.SplitN(t, ":", 4)
+                r := Record{p[0], p[1], p[2], p[3]} 
+                db.records = append(db.records, r)
+        }
+}
+
+func passSave(r *bufio.Reader) {
+        if len(db.records) == 0 {
+                return
+        }
+
+        c     := serializeDb()
+        sha   := sha256.Sum256([]byte(c))
+        if db.sha != nil && bytes.Equal(sha[:], db.sha) {
+                fmt.Println("No changes to save")
+                return //no changes to existing file
+        }
+
+        if db.filename == "" { //no existing file
+                passInit(r)
+                if db.filename == "" { //init new file failed
+                        return
+                }
+        }
+
+        sha_t := base64.StdEncoding.EncodeToString(sha[:])
+        out   := sha_t + "\r\n" + c
+
+        data, err := cryptFile([]byte(out))
+        if err != nil {
+                fmt.Printf("Error encoding file %s\n", err)
+                return
+        }
+
+        f, err := os.Create(db.filename)
+        if err != nil {
+                fmt.Printf("Error open file %s\n", err)
+                return
+        }
+        defer f.Close()
+        _, err = f.Write(data)
+        if err != nil {
+                fmt.Printf("Error writing file %s\n", err)
+        } else {
+                fmt.Println("Saved")
+        }
+}
+
 func passHelp(r *bufio.Reader) {
         for k, v := range commands_help {
                 fmt.Printf("%s:\t%s\n", k, v)
@@ -88,19 +264,19 @@ func passList(r *bufio.Reader) {
         if len(db.records) == 0 {
                 fmt.Println("No records found")
                 } else {
-                for i, v := range db.records {
-                        fmt.Printf("%d. %s (%s)\n", i, v.nick, v.hint)
+                for _, v := range db.records {
+                        fmt.Printf("[%s]:\tlogin: %s\t-- %s\n", v.nick, v.login, v.hint)
                 }
         }
 }
 
 func passAdd(r *bufio.Reader) {
-        n, err := mustString(r, "Nickname", 2)
+        n, err := mustString(r, "Nickname", 2, true)
         if (err != nil) {
                 return
         }
 
-        l, err := mustString(r, "Login", 2)
+        l, err := mustString(r, "Login", 2, false)
         if (err != nil) {
                 return
         }
@@ -126,7 +302,7 @@ func passAdd(r *bufio.Reader) {
                 if !bytes.Equal(p, p2) {
                         fmt.Println("Passwords don't match")
                 } else {
-                        r := Record{n, l, h, p}
+                        r := Record{n, l, h, base64.StdEncoding.EncodeToString(p)}
                         db.records = append(db.records, r)
                         break
                 }
@@ -158,35 +334,51 @@ func passPaste(r *bufio.Reader) {
                 if err != nil {
                         fmt.Println("Error erasing password from clipboard")
                 }
+        } else {
+                fmt.Printf("Error %s\n", err)
         }
 }
-
 
 func findPass(n string) ([]byte, error) {
         for _, v := range db.records {
                 if v.nick == n {
-                        return v.pass, nil
+                        r, err := base64.StdEncoding.DecodeString(v.pass)
+                        if err != nil {
+                                return nil, err
+                        }
+                        return r, nil
                 }
         }
         return nil, fmt.Errorf("Record %s not found", n)
 }
 
-func mustString(r *bufio.Reader, prompt string, retries int) (string, error) {
+func mustString(r *bufio.Reader, prompt string, retries int, unique bool) (string, error) {
         var n string
+        entered := false
 
         for i := 0; i < retries; i++ {
                 fmt.Printf("%s> ", prompt)
                 n, _ = r.ReadString('\n')
                 n = strings.TrimSpace(n)
-                if len(n) != 0 {
+                if len(n) == 0 {
+                        fmt.Printf("%s can't be empty\n", prompt)
+                } else if unique {
+                        _, err := findPass(n)
+                        if err == nil {
+                                fmt.Printf("%s nickname already present\n", n)
+                        } else {
+                                entered = true
+                                break
+                        }
+                } else {
+                        entered = true
                         break
                 }
-                fmt.Printf("%s can't be empty\n", prompt)
         }
-        if len(n) == 0 {
-                return "", fmt.Errorf("Empty input")
-        } else {
+        if entered {
                 return n, nil
+        } else {
+                return "", fmt.Errorf("Invalid input")
         }
 }
 
@@ -209,3 +401,31 @@ func mustPath(r *bufio.Reader, retries int) (string, error) {
         }
 }
 
+func passToKey(pass []byte) (key, iv []byte) {
+        const BLOCK_SIZE = 16
+        sha := sha256.Sum256([]byte(pass))
+        key = sha[0:BLOCK_SIZE]
+        iv  = sha[BLOCK_SIZE:len(sha)]
+        return
+}
+
+func serializeDb() string {
+        var txt []string
+        for _, v := range db.records {
+                s := fmt.Sprintf("%s:%s:%s:%s", v.nick, v.login, v.hint, v.pass)
+                txt = append(txt, s)
+        }
+        return strings.Join(txt, "\r\n")
+}
+
+func cryptFile(data []byte) ([]byte, error) {
+        out := make([]byte, len(data))
+        block, err := aes.NewCipher(db.key)
+        if err != nil {
+                return nil, err
+        }
+
+        stream := cipher.NewOFB(block, db.iv)
+        stream.XORKeyStream(out, data)
+        return out, nil
+}
